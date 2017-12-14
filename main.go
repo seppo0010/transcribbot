@@ -51,7 +51,7 @@ func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, e
 	}
 	text, err := transcribe(filename)
 	if err != nil {
-		log.Fatalf("%s", err.Error())
+		log.Println(err.Error())
 		return "", err
 	}
 	return text, nil
