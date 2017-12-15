@@ -27,6 +27,9 @@ func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, e
 	if message.Voice == nil {
 		return "", fmt.Errorf("no audio")
 	}
+	if message.Voice.Duration >= 60 {
+		return "", fmt.Errorf("too long")
+	}
 	f, err := bot.GetFile(tgbotapi.FileConfig{FileID: message.Voice.FileID})
 	if err != nil {
 		return "", err
