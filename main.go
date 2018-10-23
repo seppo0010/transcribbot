@@ -23,14 +23,26 @@ func init() {
 	}
 }
 
-func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, error) {
+func getFile(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (*tgbotapi.File, error) {
+	if message.Audio != nil {
+		if message.Audio.Duration >= 60 {
+			return nil, fmt.Errorf("too long")
+		}
+		f, err := bot.GetFile(tgbotapi.FileConfig{FileID: message.Audio.FileID})
+		return &f, err
+	}
 	if message.Voice == nil {
-		return "", fmt.Errorf("no audio")
+		return nil, fmt.Errorf("no audio")
 	}
 	if message.Voice.Duration >= 60 {
-		return "", fmt.Errorf("too long")
+		return nil, fmt.Errorf("too long")
 	}
 	f, err := bot.GetFile(tgbotapi.FileConfig{FileID: message.Voice.FileID})
+	return &f, err
+}
+
+func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, error) {
+	f, err := getFile(bot, message)
 	if err != nil {
 		return "", err
 	}
