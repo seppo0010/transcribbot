@@ -1,44 +1,69 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
+
+	log "github.com/sirupsen/logrus"
+
 	"net/http"
 	"os"
+	"os/exec"
 
-	speech "cloud.google.com/go/speech/apiv1"
-	"golang.org/x/net/context"
-	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v1"
-	"gopkg.in/telegram-bot-api.v4"
+	vosk "github.com/alphacep/vosk-api/go"
+	tgbotapi "gopkg.in/telegram-bot-api.v4"
 )
 
+const SAMPLE_RATE = 16000
+
 var token string
+var model *vosk.VoskModel
+var noAudio = fmt.Errorf("no audio")
 
 func init() {
 	token = os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
-		panic("unable to get bot token, please set TELEGRAM_BOT_TOKEN")
+		log.Fatal("unable to get bot token, please set TELEGRAM_BOT_TOKEN")
 	}
+	var err error
+	modelPath := "model"
+	if os.Getenv("VOSK_MODEL_PATH") != "" {
+		modelPath = os.Getenv("VOSK_MODEL_PATH")
+	}
+	model, err = vosk.NewModel(modelPath)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("unable to load model")
+	}
+	log.SetFormatter(&log.JSONFormatter{})
+	log.SetOutput(os.Stderr)
+	log.SetLevel(log.WarnLevel)
 }
 
 func getFile(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (*tgbotapi.File, error) {
 	if message.Audio != nil {
-		if message.Audio.Duration >= 60 {
-			return nil, fmt.Errorf("too long")
-		}
 		f, err := bot.GetFile(tgbotapi.FileConfig{FileID: message.Audio.FileID})
-		return &f, err
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Error("unable to get audio message")
+			return nil, err
+		}
+		return &f, nil
 	}
 	if message.Voice == nil {
-		return nil, fmt.Errorf("no audio")
-	}
-	if message.Voice.Duration >= 60 {
-		return nil, fmt.Errorf("too long")
+		return nil, noAudio
 	}
 	f, err := bot.GetFile(tgbotapi.FileConfig{FileID: message.Voice.FileID})
-	return &f, err
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("unable to get audio file")
+		return nil, err
+	}
+	return &f, nil
 }
 
 func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, error) {
@@ -47,26 +72,27 @@ func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, e
 		return "", err
 	}
 	link := f.Link(token)
-	filename := "audio.ogg"
-	out, err := os.Create(filename)
-	if err != nil {
-		return "", err
-	}
-	defer out.Close()
-
 	resp, err := http.Get(link)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("unable to download audio file")
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	resampled, err := resample(resp.Body)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Warn("unable to resample audio")
 		return "", err
 	}
-	text, err := transcribe(filename)
+	text, err := transcribe(resampled)
 	if err != nil {
-		log.Println(err.Error())
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("unable to transcribe audio")
 		return "", err
 	}
 	return text, nil
@@ -75,21 +101,26 @@ func getMessageReply(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (string, e
 func main() {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		log.Panic(err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("unable to start telegram bot")
 	}
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates, err := bot.GetUpdatesChan(u)
-	log.Println("ready to receive messages")
+	log.Info("ready to receive messages")
 	for update := range updates {
 		if update.Message == nil {
 			continue
 		}
 		reply, err := getMessageReply(bot, update.Message)
 		if err != nil {
-			reply = "failed: " + err.Error()
+			if err == noAudio {
+				continue
+			}
+			reply = "failed to transcribe audio"
 		}
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, reply)
 		msg.ReplyToMessageID = update.Message.MessageID
@@ -97,37 +128,45 @@ func main() {
 	}
 }
 
-func transcribe(filename string) (string, error) {
-	ctx := context.Background()
-
-	client, err := speech.NewClient(ctx)
+func resample(reader io.Reader) (io.ReadCloser, error) {
+	cmd := exec.Command("ffmpeg", "-nostdin", "-loglevel", "quiet", "-i", "-", "-ar", fmt.Sprintf("%v", SAMPLE_RATE), "-ac", "1", "-f", "s16le", "-")
+	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("failed to create client")
+		return nil, err
 	}
-
-	data, err := ioutil.ReadFile(filename)
+	in, err := cmd.StdinPipe()
 	if err != nil {
-		return "", fmt.Errorf("failed to read file")
+		return nil, err
 	}
+	go func() {
+		defer in.Close()
+		io.Copy(in, reader)
+	}()
+	go cmd.Run()
+	return out, nil
+}
 
-	resp, err := client.Recognize(ctx, &speechpb.RecognizeRequest{
-		Config: &speechpb.RecognitionConfig{
-			Encoding:        speechpb.RecognitionConfig_OGG_OPUS,
-			SampleRateHertz: 16000,
-			LanguageCode:    "es-AR",
-		},
-		Audio: &speechpb.RecognitionAudio{
-			AudioSource: &speechpb.RecognitionAudio_Content{Content: data},
-		},
-	})
+func transcribe(reader io.Reader) (string, error) {
+	rec, err := vosk.NewRecognizer(model, SAMPLE_RATE)
 	if err != nil {
-		return "", fmt.Errorf("failed to recognize")
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("failed to create recognizer")
+		return "", err
 	}
+	rec.SetWords(1)
 
-	for _, result := range resp.Results {
-		for _, alt := range result.Alternatives {
-			return fmt.Sprintf("\"%v\" (confidence=%3f)\n", alt.Transcript, alt.Confidence), nil
-		}
+	buf, err := io.ReadAll(reader)
+	rec.AcceptWaveform(buf)
+	res := struct {
+		Text string `json:"text"`
+	}{}
+	err = json.Unmarshal([]byte(rec.FinalResult()), &res)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("failed to get recognizer final result")
+		return "", err
 	}
-	return "", fmt.Errorf("unable to transcribe audio")
+	return res.Text, nil
 }
