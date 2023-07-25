@@ -39,7 +39,7 @@ func init() {
 	}
 	log.SetFormatter(&log.JSONFormatter{})
 	log.SetOutput(os.Stderr)
-	log.SetLevel(log.WarnLevel)
+	log.SetLevel(log.InfoLevel)
 }
 
 func getFile(bot *tgbotapi.BotAPI, message *tgbotapi.Message) (*tgbotapi.File, error) {
@@ -116,6 +116,7 @@ func main() {
 			continue
 		}
 		reply, err := getMessageReply(bot, update.Message)
+		log.Info("got message")
 		if err != nil {
 			if err == noAudio {
 				continue
@@ -157,6 +158,12 @@ func transcribe(reader io.Reader) (string, error) {
 	rec.SetWords(1)
 
 	buf, err := io.ReadAll(reader)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("failed to read")
+		return "", err
+	}
 	rec.AcceptWaveform(buf)
 	res := struct {
 		Text string `json:"text"`

@@ -11,4 +11,6 @@ set `VOSK_MODEL_PATH` pointing to its directory (by default, it is
 Ask [BotFather](https://t.me/BotFather) for a token and set
 `TELEGRAM_BOT_TOKEN`.
 
+Install `ffmpeg`.
+
 Run `main.go`.
